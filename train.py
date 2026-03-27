@@ -7,9 +7,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler
-
-from dataset import MRISliceDataset, N_TABULAR, TABULAR_KEYS, load_metadata
+from dataset import MRISliceDataset, N_TABULAR, load_metadata
 from model import HybridMRIClassifier
 
 
@@ -22,52 +20,127 @@ SCAN_FOLDER_TO_LABEL = {
 
 
 def load_samples(data_dir):
-    """Load samples from directory structure:
-        data_dir/
-          patient_id/
-            input/
-              nifti/
-                smri_t1w/
-                  anatImageT1.nii.gz
-                  anatImageT1.json       (optional)
-                smri_t2/
-                  ...
-                smri_t1ce/
-                  ...
-                smri_flair/
-                  ...
+    """Load samples from a dataset root where each top-level entry is a patient.
 
-    Not all patients have all scan types.
+    The scan-type folders (smri_t1w, smri_t2, smri_t1ce, smri_flair) can sit
+    at any depth inside the patient directory — intermediate sub-directories
+    (e.g. session IDs, visit labels, extra nesting) are handled transparently
+    via os.walk.
+
+    Example layouts (all supported):
+        data_dir/patient_id/input/nifti/smri_t1w/scan.nii.gz
+        data_dir/patient_id/ses-01/input/nifti/smri_t1w/scan.nii.gz
+        data_dir/patient_id/visit_2023/extra/smri_t1w/scan.nii.gz
+
+    Not all patients need all scan types.
     """
     samples = []
-    for patient_id in os.listdir(data_dir):
-        nifti_dir = os.path.join(data_dir, patient_id, "input", "nifti")
-        if not os.path.isdir(nifti_dir):
+    for patient_id in sorted(os.listdir(data_dir)):
+        patient_dir = os.path.join(data_dir, patient_id)
+        if not os.path.isdir(patient_dir):
             continue
 
-        for scan_folder, label in SCAN_FOLDER_TO_LABEL.items():
-            scan_dir = os.path.join(nifti_dir, scan_folder)
-            if not os.path.isdir(scan_dir):
+        # Walk the entire patient subtree once; collect all scan-type dirs found
+        found: dict[str, dict] = {}  # scan_folder -> {nifti, json}
+        for dirpath, dirnames, filenames in os.walk(patient_dir):
+            folder_name = os.path.basename(dirpath)
+            if folder_name not in SCAN_FOLDER_TO_LABEL:
                 continue
-
-            # Find nifti and json files in the scan folder
+            # Already found a hit for this scan type — keep the first one
+            if folder_name in found:
+                continue
             nifti_path = None
             json_path = None
-            for fname in os.listdir(scan_dir):
-                if fname.endswith((".nii", ".nii.gz")):
-                    nifti_path = os.path.join(scan_dir, fname)
-                elif fname.endswith(".json"):
-                    json_path = os.path.join(scan_dir, fname)
+            for fname in filenames:
+                if fname.endswith((".nii", ".nii.gz")) and nifti_path is None:
+                    nifti_path = os.path.join(dirpath, fname)
+                elif fname.endswith(".json") and json_path is None:
+                    json_path = os.path.join(dirpath, fname)
+            if nifti_path is not None:
+                found[folder_name] = {"nifti": nifti_path, "json": json_path}
 
-            if nifti_path is None:
-                continue
-
+        for scan_folder, paths in found.items():
             samples.append({
-                "nifti": nifti_path,
-                "json": json_path,
-                "label": label,
+                "nifti": paths["nifti"],
+                "json": paths["json"],
+                "label": SCAN_FOLDER_TO_LABEL[scan_folder],
                 "patient_id": patient_id,
             })
+
+    return samples
+
+
+def load_samples_from_scan_dirs(scan_dirs):
+    """Load samples when a separate directory is provided per scan type.
+
+    scan_dirs: dict mapping label string (e.g. 't1') to an input directory path.
+
+    Two layouts are supported automatically:
+
+    Flat layout — NIfTI files sit directly inside the scan dir.  The filename
+    stem (before .nii/.nii.gz) is used as the patient_id.  An optional JSON
+    sidecar with the same stem is loaded if present.
+        scan_dir/
+          patient001.nii.gz
+          patient001.json   (optional)
+          patient002.nii.gz
+
+    Nested layout — Each patient has its own sub-directory.  The sub-directory
+    name is used as the patient_id.  The first NIfTI file found inside is
+    loaded, along with an optional JSON sidecar.
+        scan_dir/
+          patient001/
+            scan.nii.gz
+            scan.json        (optional)
+          patient002/
+            scan.nii.gz
+    """
+    samples = []
+    for label, scan_dir in scan_dirs.items():
+        if not os.path.isdir(scan_dir):
+            print(f"Warning: {scan_dir} is not a directory, skipping label '{label}'.")
+            continue
+
+        entries = os.listdir(scan_dir)
+        nifti_files = [e for e in entries if e.endswith((".nii", ".nii.gz"))]
+
+        if nifti_files:
+            # Flat layout: NIfTI files directly in scan_dir
+            for fname in nifti_files:
+                nifti_path = os.path.join(scan_dir, fname)
+                patient_id = fname.replace(".nii.gz", "").replace(".nii", "")
+                json_path = None
+                candidate = os.path.join(scan_dir, patient_id + ".json")
+                if os.path.exists(candidate):
+                    json_path = candidate
+                samples.append({
+                    "nifti": nifti_path,
+                    "json": json_path,
+                    "label": label,
+                    "patient_id": patient_id,
+                })
+        else:
+            # Nested layout: one sub-directory per patient
+            for patient_id in sorted(entries):
+                patient_dir = os.path.join(scan_dir, patient_id)
+                if not os.path.isdir(patient_dir):
+                    continue
+                nifti_path = None
+                json_path = None
+                for fname in os.listdir(patient_dir):
+                    if fname.endswith((".nii", ".nii.gz")) and nifti_path is None:
+                        nifti_path = os.path.join(patient_dir, fname)
+                    elif fname.endswith(".json") and json_path is None:
+                        json_path = os.path.join(patient_dir, fname)
+                if nifti_path is None:
+                    continue
+                samples.append({
+                    "nifti": nifti_path,
+                    "json": json_path,
+                    "label": label,
+                    "patient_id": patient_id,
+                })
+
     return samples
 
 
@@ -158,9 +231,31 @@ def evaluate(model, loader, criterion, device, tab_mean, tab_std):
 
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--data_dir", type=str, required=True,
-                        help="Root directory with patient_id subdirs")
+    parser = argparse.ArgumentParser(
+        description="Train the hybrid MRI scan-type classifier.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Data input modes (mutually exclusive):
+
+  --data_dir   Nested dataset root:
+                 data_dir/patient_id/input/nifti/smri_t1w/...
+
+  Per-type dirs  Provide one or more of --t1_dir, --t2_dir, --t1ce_dir,
+                 --flair_dir pointing to directories that contain NIfTI
+                 files for that scan type (flat or one-level patient subdirs).
+        """,
+    )
+    # --- data input (two modes) ---
+    parser.add_argument("--data_dir", type=str, default=None,
+                        help="Nested dataset root (patient_id/input/nifti/smri_*/)")
+    parser.add_argument("--t1_dir", type=str, default=None,
+                        help="Directory containing T1w NIfTI files")
+    parser.add_argument("--t2_dir", type=str, default=None,
+                        help="Directory containing T2 NIfTI files")
+    parser.add_argument("--t1ce_dir", type=str, default=None,
+                        help="Directory containing T1ce NIfTI files")
+    parser.add_argument("--flair_dir", type=str, default=None,
+                        help="Directory containing FLAIR NIfTI files")
     parser.add_argument("--output_dir", type=str, default="checkpoints")
     parser.add_argument("--epochs", type=int, default=30)
     parser.add_argument("--unfreeze_epoch", type=int, default=10,
@@ -185,7 +280,25 @@ def main():
     print(f"Using device: {device}")
 
     # Load and split data by patient (not by volume) to avoid leakage
-    samples = load_samples(args.data_dir)
+    scan_dirs = {
+        label: path
+        for label, path in [
+            ("t1", args.t1_dir),
+            ("t2", args.t2_dir),
+            ("t1ce", args.t1ce_dir),
+            ("flair", args.flair_dir),
+        ]
+        if path is not None
+    }
+    if scan_dirs:
+        samples = load_samples_from_scan_dirs(scan_dirs)
+    elif args.data_dir:
+        samples = load_samples(args.data_dir)
+    else:
+        parser.error(
+            "Provide --data_dir or at least one of "
+            "--t1_dir / --t2_dir / --t1ce_dir / --flair_dir"
+        )
     print(f"Found {len(samples)} volumes")
 
     patient_ids = list(set(s["patient_id"] for s in samples))
