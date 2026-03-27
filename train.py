@@ -1,6 +1,8 @@
 import argparse
 import json
+import logging
 import os
+import time
 
 import numpy as np
 import torch
@@ -9,6 +11,13 @@ from torch.utils.data import DataLoader
 from sklearn.model_selection import train_test_split
 from dataset import MRISliceDataset, N_TABULAR, load_metadata
 from model import HybridMRIClassifier
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s  %(message)s",
+    datefmt="%H:%M:%S",
+)
+log = logging.getLogger(__name__)
 
 
 SCAN_FOLDER_TO_LABEL = {
@@ -175,21 +184,24 @@ def normalize_tabular_in_samples(samples, mean, std):
     return {"mean": mean.tolist(), "std": std.tolist()}
 
 
-def train_one_epoch(model, loader, criterion, optimizer, device, tab_mean, tab_std):
+def train_one_epoch(model, loader, criterion, optimizer, device, tab_mean, tab_std,
+                    log_interval=20):
     model.train()
     total_loss = 0
     correct = 0
     total = 0
+    n_batches = len(loader)
+    t0 = time.time()
 
-    for batch in loader:
+    tab_mean_t = torch.tensor(tab_mean, device=device)
+    tab_std_t = torch.tensor(tab_std, device=device)
+
+    for i, batch in enumerate(loader):
         images = batch["image"].to(device)
         tabular = batch["tabular"].to(device)
         tabular_mask = batch["tabular_mask"].to(device)
         labels = batch["label"].to(device)
 
-        # Normalize tabular features
-        tab_mean_t = torch.tensor(tab_mean, device=device)
-        tab_std_t = torch.tensor(tab_std, device=device)
         tabular = (tabular - tab_mean_t) / tab_std_t
 
         logits = model(images, tabular, tabular_mask)
@@ -204,24 +216,36 @@ def train_one_epoch(model, loader, criterion, optimizer, device, tab_mean, tab_s
         correct += (preds == labels).sum().item()
         total += images.size(0)
 
+        if (i + 1) % log_interval == 0 or (i + 1) == n_batches:
+            elapsed = time.time() - t0
+            log.info(
+                f"  [train] batch {i+1:4d}/{n_batches} | "
+                f"loss {total_loss/total:.4f} | "
+                f"acc {correct/total:.4f} | "
+                f"{elapsed:.1f}s elapsed"
+            )
+
     return total_loss / total, correct / total
 
 
 @torch.no_grad()
-def evaluate(model, loader, criterion, device, tab_mean, tab_std):
+def evaluate(model, loader, criterion, device, tab_mean, tab_std, log_interval=20):
     model.eval()
     total_loss = 0
     correct = 0
     total = 0
+    n_batches = len(loader)
+    t0 = time.time()
 
-    for batch in loader:
+    tab_mean_t = torch.tensor(tab_mean, device=device)
+    tab_std_t = torch.tensor(tab_std, device=device)
+
+    for i, batch in enumerate(loader):
         images = batch["image"].to(device)
         tabular = batch["tabular"].to(device)
         tabular_mask = batch["tabular_mask"].to(device)
         labels = batch["label"].to(device)
 
-        tab_mean_t = torch.tensor(tab_mean, device=device)
-        tab_std_t = torch.tensor(tab_std, device=device)
         tabular = (tabular - tab_mean_t) / tab_std_t
 
         logits = model(images, tabular, tabular_mask)
@@ -231,6 +255,15 @@ def evaluate(model, loader, criterion, device, tab_mean, tab_std):
         preds = logits.argmax(dim=1)
         correct += (preds == labels).sum().item()
         total += images.size(0)
+
+        if (i + 1) % log_interval == 0 or (i + 1) == n_batches:
+            elapsed = time.time() - t0
+            log.info(
+                f"  [val]   batch {i+1:4d}/{n_batches} | "
+                f"loss {total_loss/total:.4f} | "
+                f"acc {correct/total:.4f} | "
+                f"{elapsed:.1f}s elapsed"
+            )
 
     return total_loss / total, correct / total
 
@@ -262,6 +295,9 @@ Data input modes (mutually exclusive):
     parser.add_argument("--flair_dir", type=str, default=None,
                         help="Directory containing FLAIR NIfTI files")
     parser.add_argument("--output_dir", type=str, default="checkpoints")
+    parser.add_argument("--cache_dir", type=str, default=".slice_cache",
+                        help="Directory for cached extracted slices "
+                             "(set to empty string to disable)")
     parser.add_argument("--epochs", type=int, default=500)
     parser.add_argument("--unfreeze_epoch", type=int, default=50,
                         help="Epoch at which to unfreeze all CNN layers")
@@ -285,9 +321,10 @@ Data input modes (mutually exclusive):
     device = torch.device("cuda" if torch.cuda.is_available()
                           else "mps" if torch.backends.mps.is_available()
                           else "cpu")
-    print(f"Using device: {device}")
+    log.info(f"Using device: {device}")
 
     # Load and split data by patient (not by volume) to avoid leakage
+    log.info("Scanning dataset directories...")
     scan_dirs = {
         label: path
         for label, path in [
@@ -307,7 +344,7 @@ Data input modes (mutually exclusive):
             "Provide --data_dir or at least one of "
             "--t1_dir / --t2_dir / --t1ce_dir / --flair_dir"
         )
-    print(f"Found {len(samples)} volumes")
+    log.info(f"Found {len(samples)} volumes")
 
     patient_ids = list(set(s["patient_id"] for s in samples))
     train_pids, val_pids = train_test_split(
@@ -316,22 +353,36 @@ Data input modes (mutually exclusive):
     train_pids, val_pids = set(train_pids), set(val_pids)
     train_samples = [s for s in samples if s["patient_id"] in train_pids]
     val_samples = [s for s in samples if s["patient_id"] in val_pids]
-    print(f"Train: {len(train_samples)} volumes, Val: {len(val_samples)} volumes")
+    log.info(f"Train: {len(train_samples)} volumes | Val: {len(val_samples)} volumes")
 
     # Compute tabular normalization from training set only
+    log.info("Computing tabular feature statistics...")
     tab_mean, tab_std = compute_tabular_stats(train_samples)
     tab_stats = {"mean": tab_mean.tolist(), "std": tab_std.tolist()}
     with open(os.path.join(args.output_dir, "tabular_stats.json"), "w") as f:
         json.dump(tab_stats, f)
+    log.info("Tabular stats saved.")
 
     # Datasets
+    cache_dir = args.cache_dir if args.cache_dir else None
+    if cache_dir:
+        os.makedirs(cache_dir, exist_ok=True)
+        log.info(f"Slice cache: {os.path.abspath(cache_dir)}")
+    else:
+        log.info("Slice cache disabled.")
+
+    log.info("Building datasets...")
     train_ds = MRISliceDataset(
         train_samples, n_slices=args.n_slices, augment=True,
-        tabular_dropout=args.tabular_dropout,
+        tabular_dropout=args.tabular_dropout, cache_dir=cache_dir,
     )
     val_ds = MRISliceDataset(
         val_samples, n_slices=args.n_slices, augment=False,
-        tabular_dropout=0.0,
+        tabular_dropout=0.0, cache_dir=cache_dir,
+    )
+    log.info(
+        f"Train slices: {len(train_ds)} | Val slices: {len(val_ds)} | "
+        f"Batch size: {args.batch_size}"
     )
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,
                               num_workers=4, pin_memory=False)
@@ -339,7 +390,12 @@ Data input modes (mutually exclusive):
                             num_workers=4, pin_memory=False)
 
     # Model
+    log.info("Initialising model...")
     model = HybridMRIClassifier(n_classes=4, freeze_early=True).to(device)
+    n_params = sum(p.numel() for p in model.parameters())
+    n_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    log.info(f"Parameters: {n_params:,} total | {n_trainable:,} trainable")
+
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(
         filter(lambda p: p.requires_grad, model.parameters()), lr=args.lr
@@ -348,47 +404,62 @@ Data input modes (mutually exclusive):
         optimizer, patience=3, factor=0.5
     )
 
+    log.info(f"Starting training: max {args.epochs} epochs | "
+             f"early stopping patience {args.early_stopping_patience}")
+
     best_val_acc = 0.0
     epochs_no_improve = 0
     for epoch in range(args.epochs):
+        epoch_start = time.time()
+
         # Unfreeze all layers at specified epoch
         if epoch == args.unfreeze_epoch:
-            print(f"\n--- Unfreezing all CNN layers at epoch {epoch} ---")
+            log.info(f"--- Unfreezing all CNN layers at epoch {epoch+1} ---")
             model.unfreeze_all()
             optimizer = torch.optim.Adam(model.parameters(), lr=args.lr_finetune)
             scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
                 optimizer, patience=3, factor=0.5
             )
+            n_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+            log.info(f"Trainable parameters after unfreeze: {n_trainable:,}")
 
+        log.info(f"Epoch {epoch+1}/{args.epochs} — training...")
         train_loss, train_acc = train_one_epoch(
             model, train_loader, criterion, optimizer, device, tab_mean, tab_std
         )
+
+        log.info(f"Epoch {epoch+1}/{args.epochs} — validating...")
         val_loss, val_acc = evaluate(
             model, val_loader, criterion, device, tab_mean, tab_std
         )
         scheduler.step(val_loss)
 
         lr = optimizer.param_groups[0]["lr"]
-        print(f"Epoch {epoch+1:3d}/{args.epochs} | "
-              f"Train Loss: {train_loss:.4f} Acc: {train_acc:.4f} | "
-              f"Val Loss: {val_loss:.4f} Acc: {val_acc:.4f} | LR: {lr:.6f}")
+        elapsed = time.time() - epoch_start
+        log.info(
+            f"Epoch {epoch+1:3d}/{args.epochs} | "
+            f"Train Loss {train_loss:.4f}  Acc {train_acc:.4f} | "
+            f"Val Loss {val_loss:.4f}  Acc {val_acc:.4f} | "
+            f"LR {lr:.2e} | {elapsed:.1f}s"
+        )
 
         if val_acc > best_val_acc:
             best_val_acc = val_acc
             epochs_no_improve = 0
             torch.save(model.state_dict(),
                        os.path.join(args.output_dir, "best_model.pth"))
-            print(f"  -> Saved best model (val_acc={val_acc:.4f})")
+            log.info(f"  -> New best model saved (val_acc={val_acc:.4f})")
         else:
             epochs_no_improve += 1
+            log.info(f"  -> No improvement ({epochs_no_improve}/"
+                     f"{args.early_stopping_patience})")
 
         if (args.early_stopping_patience > 0
                 and epochs_no_improve >= args.early_stopping_patience):
-            print(f"\nEarly stopping: val accuracy did not improve for "
-                  f"{args.early_stopping_patience} epochs.")
+            log.info(f"Early stopping triggered after {epoch+1} epochs.")
             break
 
-    print(f"\nTraining complete. Best val accuracy: {best_val_acc:.4f}")
+    log.info(f"Training complete. Best val accuracy: {best_val_acc:.4f}")
 
 
 if __name__ == "__main__":
