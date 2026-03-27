@@ -334,9 +334,9 @@ Data input modes (mutually exclusive):
         tabular_dropout=0.0,
     )
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,
-                              num_workers=4, pin_memory=True)
+                              num_workers=4, pin_memory=False)
     val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False,
-                            num_workers=4, pin_memory=True)
+                            num_workers=4, pin_memory=False)
 
     # Model
     model = HybridMRIClassifier(n_classes=4, freeze_early=True).to(device)

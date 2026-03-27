@@ -100,7 +100,7 @@ class MRISliceDataset(Dataset):
         slice_idx = idx % self.slices_per_vol
         sample = self.samples[vol_idx]
 
-        vol = nib.load(sample["nifti"]).get_fdata()
+        vol = np.squeeze(nib.load(sample["nifti"]).get_fdata())
         all_slices = extract_slices(vol, self.n_slices)
         slice_2d = normalize_slice(all_slices[slice_idx])
 
@@ -150,7 +150,7 @@ class MRIVolumeDataset(Dataset):
     def __getitem__(self, idx):
         sample = self.samples[idx]
 
-        vol = nib.load(sample["nifti"]).get_fdata()
+        vol = np.squeeze(nib.load(sample["nifti"]).get_fdata())
         all_slices = extract_slices(vol, self.n_slices)
 
         images = []
