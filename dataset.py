@@ -173,6 +173,21 @@ class MRISliceDataset(Dataset):
         self.cache_dir = cache_dir
         self.lru_size = lru_size
 
+        # Cache tabular features and labels at init — one JSON read per volume
+        # instead of one per slice per epoch
+        self._tabular = []
+        self._tab_mask = []
+        self._labels = []
+        for s in samples:
+            if s.get("json") and os.path.exists(s["json"]):
+                tab, msk = load_metadata(s["json"])
+            else:
+                tab = np.zeros(N_TABULAR, dtype=np.float32)
+                msk = np.zeros(N_TABULAR, dtype=np.float32)
+            self._tabular.append(tab)
+            self._tab_mask.append(msk)
+            self._labels.append(LABEL_MAP[s["label"].lower()])
+
         if preload:
             log.info(f"Preloading {len(samples)} volumes into RAM...")
             self._preloaded = []
@@ -234,30 +249,24 @@ class MRISliceDataset(Dataset):
     def __getitem__(self, idx):
         vol_idx = idx // self.slices_per_vol
         slice_idx = idx % self.slices_per_vol
-        sample = self.samples[vol_idx]
 
         slice_2d = normalize_slice(self._get_slices(vol_idx)[slice_idx])
         img = self.transform(slice_2d)
         img = img.repeat(3, 1, 1) if img.shape[0] == 1 else img
 
-        if sample.get("json") and os.path.exists(sample["json"]):
-            tabular, mask = load_metadata(sample["json"])
-        else:
-            tabular = np.zeros(N_TABULAR, dtype=np.float32)
-            mask = np.zeros(N_TABULAR, dtype=np.float32)
+        tabular = self._tabular[vol_idx]
+        tab_mask = self._tab_mask[vol_idx].copy()
 
         # Modality dropout: randomly zero out all tabular features during training
         # so the CNN learns to classify standalone
         if self.tabular_dropout > 0 and np.random.rand() < self.tabular_dropout:
-            mask = np.zeros(N_TABULAR, dtype=np.float32)
-
-        label = LABEL_MAP[sample["label"].lower()]
+            tab_mask = np.zeros(N_TABULAR, dtype=np.float32)
 
         return {
             "image": img,
             "tabular": torch.tensor(tabular),
-            "tabular_mask": torch.tensor(mask),
-            "label": torch.tensor(label, dtype=torch.long),
+            "tabular_mask": torch.tensor(tab_mask),
+            "label": torch.tensor(self._labels[vol_idx], dtype=torch.long),
             "vol_idx": vol_idx,
             "is_mip": slice_idx == self.n_slices,
         }

@@ -476,10 +476,13 @@ Data input modes (mutually exclusive):
     )
     train_sampler = VolumeGroupedSampler(train_ds, shuffle=True)
     val_sampler = VolumeGroupedSampler(val_ds, shuffle=False)
+    n_workers = min(4, os.cpu_count() or 1)
     train_loader = DataLoader(train_ds, batch_size=args.batch_size,
-                              sampler=train_sampler, num_workers=2, pin_memory=False)
+                              sampler=train_sampler, num_workers=n_workers,
+                              pin_memory=False, persistent_workers=True)
     val_loader = DataLoader(val_ds, batch_size=args.batch_size,
-                            sampler=val_sampler, num_workers=2, pin_memory=False)
+                            sampler=val_sampler, num_workers=n_workers,
+                            pin_memory=False, persistent_workers=True)
 
     # Model
     log.info("Initialising model...")
