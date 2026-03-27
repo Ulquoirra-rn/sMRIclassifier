@@ -6,7 +6,7 @@ from collections import OrderedDict
 import numpy as np
 import nibabel as nib
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, Sampler
 from torchvision import transforms
 from PIL import Image as PILImage
 
@@ -82,8 +82,8 @@ def normalize_slice(slice_2d):
     return s
 
 
-def _cache_path(cache_dir, nifti_path, image_size):
-    key = f"{os.path.abspath(nifti_path)}:{image_size}"
+def _cache_path(cache_dir, nifti_path, n_slices, image_size):
+    key = f"{os.path.abspath(nifti_path)}:{n_slices}:{image_size}"
     h = hashlib.md5(key.encode()).hexdigest()
     return os.path.join(cache_dir, f"{h}.npz")
 
@@ -97,7 +97,7 @@ def _get_volume_slices(nifti_path, n_slices, image_size, cache_dir):
     worker never leaves a corrupt cache entry.
     """
     if cache_dir is not None:
-        path = _cache_path(cache_dir, nifti_path, image_size)
+        path = _cache_path(cache_dir, nifti_path, n_slices, image_size)
         if os.path.exists(path):
             try:
                 cached = np.load(path)
@@ -276,3 +276,31 @@ class MRIVolumeDataset(Dataset):
             "tabular_mask": torch.tensor(mask),
             "label": torch.tensor(label, dtype=torch.long),
         }
+
+
+class VolumeGroupedSampler(Sampler):
+    """Yields slice indices grouped by volume.
+
+    Volumes are shuffled each epoch, but all slices within a volume are
+    yielded consecutively.  This means each DataLoader batch contains slices
+    from at most ceil(batch_size / slices_per_vol) different volumes, giving a
+    near-100% LRU cache hit rate without loading the full dataset into RAM.
+    """
+
+    def __init__(self, dataset: MRISliceDataset, shuffle: bool = True):
+        self.n_volumes = len(dataset.samples)
+        self.slices_per_vol = dataset.slices_per_vol
+        self.shuffle = shuffle
+
+    def __len__(self):
+        return self.n_volumes * self.slices_per_vol
+
+    def __iter__(self):
+        vol_order = (
+            torch.randperm(self.n_volumes).tolist()
+            if self.shuffle
+            else range(self.n_volumes)
+        )
+        for vol_idx in vol_order:
+            base = vol_idx * self.slices_per_vol
+            yield from range(base, base + self.slices_per_vol)

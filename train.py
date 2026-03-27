@@ -9,7 +9,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from sklearn.model_selection import train_test_split
-from dataset import MRISliceDataset, N_TABULAR, load_metadata
+from dataset import MRISliceDataset, VolumeGroupedSampler, N_TABULAR, load_metadata
 from model import HybridMRIClassifier
 
 logging.basicConfig(
@@ -306,7 +306,8 @@ Data input modes (mutually exclusive):
                              "val loss improvement (0 to disable)")
     parser.add_argument("--early_stopping_min_delta", type=float, default=1e-4,
                         help="Minimum decrease in val loss to count as improvement")
-    parser.add_argument("--batch_size", type=int, default=16)
+    parser.add_argument("--batch_size", type=int, default=51,
+                        help="Ideally n_slices+1 so each batch is exactly one volume")
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--lr_finetune", type=float, default=1e-4,
                         help="LR after unfreezing")
@@ -386,10 +387,12 @@ Data input modes (mutually exclusive):
         f"Train slices: {len(train_ds)} | Val slices: {len(val_ds)} | "
         f"Batch size: {args.batch_size}"
     )
-    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,
-                              num_workers=4, pin_memory=False)
-    val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False,
-                            num_workers=4, pin_memory=False)
+    train_sampler = VolumeGroupedSampler(train_ds, shuffle=True)
+    val_sampler = VolumeGroupedSampler(val_ds, shuffle=False)
+    train_loader = DataLoader(train_ds, batch_size=args.batch_size,
+                              sampler=train_sampler, num_workers=2, pin_memory=False)
+    val_loader = DataLoader(val_ds, batch_size=args.batch_size,
+                            sampler=val_sampler, num_workers=2, pin_memory=False)
 
     # Model
     log.info("Initialising model...")
