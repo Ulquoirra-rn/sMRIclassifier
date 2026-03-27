@@ -5,6 +5,7 @@ import nibabel as nib
 import torch
 from torch.utils.data import Dataset
 from torchvision import transforms
+from PIL import Image as PILImage
 
 
 LABEL_MAP = {"t1": 0, "t2": 1, "flair": 2, "t1ce": 3}
@@ -29,10 +30,12 @@ def load_metadata(json_path):
     return np.array(values, dtype=np.float32), np.array(mask, dtype=np.float32)
 
 
-def extract_slices(volume, n_slices=15):
+def extract_slices(volume, n_slices=15, image_size=None):
     """Extract n evenly spaced axial slices + axial MIP from the volume.
 
-    Returns a list of 2D arrays: n_slices regular slices followed by 1 MIP.
+    Returns a list of 2D float32 arrays: n_slices regular slices followed by
+    1 MIP.  If image_size is given every slice is resized to
+    (image_size, image_size) immediately, capping memory for high-res scans.
     """
     n_axial = volume.shape[2]
     # Skip top/bottom 10% to avoid empty slices
@@ -45,6 +48,19 @@ def extract_slices(volume, n_slices=15):
     # Axial max-intensity projection
     mip = np.max(volume[:, :, start:end], axis=2)
     slices.append(mip)
+
+    if image_size is not None:
+        resized = []
+        for s in slices:
+            arr = s.astype(np.float32)
+            if arr.shape[0] != image_size or arr.shape[1] != image_size:
+                arr = np.array(
+                    PILImage.fromarray(arr, mode="F").resize(
+                        (image_size, image_size), PILImage.BILINEAR
+                    )
+                )
+            resized.append(arr)
+        return resized
 
     return slices
 
@@ -101,7 +117,7 @@ class MRISliceDataset(Dataset):
         sample = self.samples[vol_idx]
 
         vol = np.squeeze(nib.load(sample["nifti"]).get_fdata())
-        all_slices = extract_slices(vol, self.n_slices)
+        all_slices = extract_slices(vol, self.n_slices, image_size=self.image_size)
         slice_2d = normalize_slice(all_slices[slice_idx])
 
         img = self.transform(slice_2d)
@@ -151,7 +167,7 @@ class MRIVolumeDataset(Dataset):
         sample = self.samples[idx]
 
         vol = np.squeeze(nib.load(sample["nifti"]).get_fdata())
-        all_slices = extract_slices(vol, self.n_slices)
+        all_slices = extract_slices(vol, self.n_slices, image_size=self.image_size)
 
         images = []
         for s in all_slices:
