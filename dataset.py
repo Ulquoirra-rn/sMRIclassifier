@@ -53,6 +53,9 @@ def extract_slices(volume, n_slices=15, image_size=None):
         resized = []
         for s in slices:
             arr = s.astype(np.float32)
+            # Collapse any trailing dimensions (e.g. complex/multi-component)
+            while arr.ndim > 2:
+                arr = arr[..., 0]
             if arr.shape[0] != image_size or arr.shape[1] != image_size:
                 arr = np.array(
                     PILImage.fromarray(arr, mode="F").resize(
@@ -117,6 +120,8 @@ class MRISliceDataset(Dataset):
         sample = self.samples[vol_idx]
 
         vol = np.squeeze(nib.load(sample["nifti"]).get_fdata())
+        if vol.ndim > 3:
+            vol = vol[..., 0]
         all_slices = extract_slices(vol, self.n_slices, image_size=self.image_size)
         slice_2d = normalize_slice(all_slices[slice_idx])
 
@@ -167,6 +172,8 @@ class MRIVolumeDataset(Dataset):
         sample = self.samples[idx]
 
         vol = np.squeeze(nib.load(sample["nifti"]).get_fdata())
+        if vol.ndim > 3:
+            vol = vol[..., 0]
         all_slices = extract_slices(vol, self.n_slices, image_size=self.image_size)
 
         images = []
