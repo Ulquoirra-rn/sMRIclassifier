@@ -20,46 +20,51 @@ SCAN_FOLDER_TO_LABEL = {
 
 
 def load_samples(data_dir):
-    """Load samples from a dataset root where each top-level entry is a patient.
+    """Walk the entire data_dir tree and collect all scan-type directories.
 
-    The scan-type folders (smri_t1w, smri_t2, smri_t1ce, smri_flair) can sit
-    at any depth inside the patient directory — intermediate sub-directories
-    (e.g. session IDs, visit labels, extra nesting) are handled transparently
-    via os.walk.
+    Scan-type folders (smri_t1w, smri_t2, smri_t1ce, smri_flair) are found
+    at any depth — no assumptions are made about the number of intermediate
+    directory levels.
 
-    Example layouts (all supported):
+    Scans that share the same parent directory are treated as the same
+    patient/visit for train-val splitting (all scan types under one 'nifti/'
+    folder stay together in the same split partition).
+
+    Example (all supported):
+        data_dir/40/00/0011/Visit1/Glioma/input/nifti/smri_t1w/scan.nii.gz
         data_dir/patient_id/input/nifti/smri_t1w/scan.nii.gz
-        data_dir/patient_id/ses-01/input/nifti/smri_t1w/scan.nii.gz
-        data_dir/patient_id/visit_2023/extra/smri_t1w/scan.nii.gz
-
-    Not all patients need all scan types.
+        data_dir/patient_id/ses-01/input/nifti/smri_flair/scan.nii.gz
     """
-    samples = []
-    for patient_id in sorted(os.listdir(data_dir)):
-        patient_dir = os.path.join(data_dir, patient_id)
-        if not os.path.isdir(patient_dir):
+    # parent_dir -> {scan_folder_name -> {"nifti": ..., "json": ...}}
+    groups = {}
+
+    for dirpath, _, filenames in os.walk(data_dir):
+        folder_name = os.path.basename(dirpath)
+        if folder_name not in SCAN_FOLDER_TO_LABEL:
             continue
 
-        # Walk the entire patient subtree once; collect all scan-type dirs found
-        found: dict[str, dict] = {}  # scan_folder -> {nifti, json}
-        for dirpath, dirnames, filenames in os.walk(patient_dir):
-            folder_name = os.path.basename(dirpath)
-            if folder_name not in SCAN_FOLDER_TO_LABEL:
-                continue
-            # Already found a hit for this scan type — keep the first one
-            if folder_name in found:
-                continue
-            nifti_path = None
-            json_path = None
-            for fname in filenames:
-                if fname.endswith((".nii", ".nii.gz")) and nifti_path is None:
-                    nifti_path = os.path.join(dirpath, fname)
-                elif fname.endswith(".json") and json_path is None:
-                    json_path = os.path.join(dirpath, fname)
-            if nifti_path is not None:
-                found[folder_name] = {"nifti": nifti_path, "json": json_path}
+        parent = os.path.dirname(dirpath)
+        if parent not in groups:
+            groups[parent] = {}
+        if folder_name in groups[parent]:
+            continue  # duplicate scan type under same parent — keep first
 
-        for scan_folder, paths in found.items():
+        nifti_path = None
+        json_path = None
+        for fname in filenames:
+            if fname.endswith((".nii", ".nii.gz")) and nifti_path is None:
+                nifti_path = os.path.join(dirpath, fname)
+            elif fname.endswith(".json") and json_path is None:
+                json_path = os.path.join(dirpath, fname)
+
+        if nifti_path is not None:
+            groups[parent][folder_name] = {"nifti": nifti_path, "json": json_path}
+
+    samples = []
+    for parent, scan_map in groups.items():
+        # Relative path of the parent dir acts as the patient/visit identifier
+        patient_id = os.path.relpath(parent, data_dir)
+        for scan_folder, paths in scan_map.items():
             samples.append({
                 "nifti": paths["nifti"],
                 "json": paths["json"],

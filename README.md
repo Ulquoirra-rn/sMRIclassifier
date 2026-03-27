@@ -69,22 +69,25 @@ folders (`smri_t1w`, `smri_t2`, `smri_t1ce`, `smri_flair`) are located by
 walking the entire patient sub-tree, so intermediate directories at any depth
 are handled transparently — session IDs, visit labels, extra nesting, etc.
 
+The entire tree under `data_dir` is walked recursively — no assumptions are
+made about the number of intermediate directory levels.  Scan-type folders
+(`smri_t1w`, `smri_t2`, `smri_t1ce`, `smri_flair`) are located wherever they
+appear.  Sibling scan-type folders sharing the same parent directory are
+grouped as one patient/visit for train-val splitting.
+
 ```
-data_dir/
-  patient001/                        # fixed depth
-    input/nifti/smri_t1w/scan.nii.gz
-    input/nifti/smri_t2/scan.nii.gz
-  patient002/                        # extra session level
-    ses-01/input/nifti/smri_t1w/scan.nii.gz
-    ses-01/input/nifti/smri_flair/scan.nii.gz
-  patient003/                        # arbitrary nesting
-    visit_2023/extra/smri_t1ce/scan.nii.gz
-    visit_2023/extra/smri_t1ce/scan.json   # optional sidecar
+# Shallow layout
+data_dir/patient001/input/nifti/smri_t1w/scan.nii.gz
+
+# Deep / segmented ID layout
+data_dir/40/00/0011/Visit1_Dataentry_2/Glioma/input/nifti/smri_t1w/scan.nii.gz
+data_dir/40/00/0011/Visit1_Dataentry_2/Glioma/input/nifti/smri_flair/scan.nii.gz
+
+# Mixed depth — all handled automatically
+data_dir/patient002/ses-01/input/nifti/smri_t2/scan.nii.gz
 ```
 
-Not all scan types need to be present for every patient.  If multiple
-directories with the same scan-type name exist under one patient, the first one
-found (depth-first) is used.
+Not all scan types need to be present for every patient.
 
 ---
 
