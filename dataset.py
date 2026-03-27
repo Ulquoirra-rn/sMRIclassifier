@@ -82,14 +82,19 @@ def normalize_slice(slice_2d):
     return s
 
 
-def _cache_path(cache_dir, nifti_path, n_slices, image_size):
-    key = f"{os.path.abspath(nifti_path)}:{n_slices}:{image_size}"
+def _cache_path(cache_dir, nifti_path, n_slices, image_size, mask_path=None):
+    mask_part = os.path.abspath(mask_path) if mask_path else ""
+    key = f"{os.path.abspath(nifti_path)}:{n_slices}:{image_size}:{mask_part}"
     h = hashlib.md5(key.encode()).hexdigest()
     return os.path.join(cache_dir, f"{h}.npz")
 
 
-def _get_volume_slices(nifti_path, n_slices, image_size, cache_dir):
+def _get_volume_slices(nifti_path, n_slices, image_size, cache_dir, mask_path=None):
     """Return extracted slices for a volume, using a disk cache when available.
+
+    If mask_path is provided the brain mask is applied to the volume before
+    slice extraction so non-brain voxels are zeroed.  The mask path is folded
+    into the cache key so masked and unmasked slices are stored separately.
 
     Cache files are stored as .npz under cache_dir and validated against the
     source file's mtime — if the NIfTI is replaced or modified the cache is
@@ -97,18 +102,29 @@ def _get_volume_slices(nifti_path, n_slices, image_size, cache_dir):
     worker never leaves a corrupt cache entry.
     """
     if cache_dir is not None:
-        path = _cache_path(cache_dir, nifti_path, n_slices, image_size)
+        path = _cache_path(cache_dir, nifti_path, n_slices, image_size, mask_path)
         if os.path.exists(path):
             try:
                 cached = np.load(path)
                 if float(cached["mtime"]) == os.path.getmtime(nifti_path):
-                    return list(cached["slices"])  # list of (image_size, image_size) arrays
+                    return list(cached["slices"])
             except Exception:
                 pass  # corrupted cache — fall through to recompute
 
     vol = np.squeeze(nib.load(nifti_path).get_fdata())
     if vol.ndim > 3:
         vol = vol[..., 0]
+
+    if mask_path and os.path.exists(mask_path):
+        mask = np.squeeze(nib.load(mask_path).get_fdata()).astype(bool)
+        if mask.shape == vol.shape:
+            vol = vol * mask
+        else:
+            log.warning(
+                f"Mask shape {mask.shape} != volume shape {vol.shape} "
+                f"for {nifti_path} — skipping mask."
+            )
+
     slices = extract_slices(vol, n_slices, image_size=image_size)
 
     if cache_dir is not None:
@@ -148,7 +164,10 @@ class MRISliceDataset(Dataset):
             log.info(f"Preloading {len(samples)} volumes into RAM...")
             self._preloaded = []
             for i, s in enumerate(samples):
-                slices = _get_volume_slices(s["nifti"], n_slices, image_size, cache_dir)
+                slices = _get_volume_slices(
+                    s["nifti"], n_slices, image_size, cache_dir,
+                    mask_path=s.get("mask"),
+                )
                 self._preloaded.append(np.stack(slices))
                 if (i + 1) % 100 == 0 or (i + 1) == len(samples):
                     log.info(f"  Preloaded {i+1}/{len(samples)} volumes")
@@ -187,6 +206,7 @@ class MRISliceDataset(Dataset):
         slices = _get_volume_slices(
             self.samples[vol_idx]["nifti"], self.n_slices,
             self.image_size, self.cache_dir,
+            mask_path=self.samples[vol_idx].get("mask"),
         )
         arr = np.stack(slices)
         self._lru[vol_idx] = arr
@@ -241,7 +261,10 @@ class MRIVolumeDataset(Dataset):
         # Preload all slices into RAM
         self._slices = []
         for s in samples:
-            slices = _get_volume_slices(s["nifti"], n_slices, image_size, cache_dir)
+            slices = _get_volume_slices(
+                s["nifti"], n_slices, image_size, cache_dir,
+                mask_path=s.get("mask"),
+            )
             self._slices.append(np.stack(slices))
 
         self.transform = transforms.Compose([

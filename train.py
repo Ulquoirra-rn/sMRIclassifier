@@ -1,8 +1,10 @@
 import argparse
+import hashlib
 import json
 import logging
 import os
 import time
+from collections import defaultdict
 
 import numpy as np
 import torch
@@ -268,6 +270,80 @@ def evaluate(model, loader, criterion, device, tab_mean, tab_std, log_interval=2
     return total_loss / total, correct / total
 
 
+def skull_strip_samples(samples, mask_cache_dir):
+    """Generate brain masks from T1w scans using deepbet and store the mask
+    path in every sample for that patient so all modalities are masked with
+    the same T1w-derived mask.
+
+    Masks are cached under mask_cache_dir and reused across runs.  A mask is
+    rebuilt only if the source T1w file is newer than the cached mask.
+
+    Patients without a T1w scan are left unmasked (mask=None) with a warning.
+    """
+    try:
+        from deepbet import run_bet
+    except ImportError:
+        raise ImportError(
+            "deepbet is required for skull stripping. "
+            "Install with: pip install deepbet==1.0.2"
+        )
+
+    os.makedirs(mask_cache_dir, exist_ok=True)
+
+    # Group samples by patient_id and find the T1w scan per patient
+    by_patient = defaultdict(list)
+    for s in samples:
+        by_patient[s["patient_id"]].append(s)
+
+    # Determine mask path for each patient's T1w; collect those needing (re)build
+    patient_mask_path = {}   # patient_id -> mask_path (or None)
+    to_build = []            # (t1w_path, mask_path) pairs
+
+    for patient_id, psamples in by_patient.items():
+        t1w = next((s for s in psamples if s["label"] == "t1"), None)
+        if t1w is None:
+            log.warning(f"No T1w scan for patient {patient_id!r} — skipping skull strip.")
+            patient_mask_path[patient_id] = None
+            continue
+
+        t1w_path = t1w["nifti"]
+        key = hashlib.md5(os.path.abspath(t1w_path).encode()).hexdigest()
+        mask_path = os.path.join(mask_cache_dir, f"{key}_mask.nii.gz")
+        patient_mask_path[patient_id] = mask_path
+
+        # Cache valid if mask exists and is newer than the T1w source
+        if (os.path.exists(mask_path)
+                and os.path.getmtime(mask_path) >= os.path.getmtime(t1w_path)):
+            continue
+        to_build.append((t1w_path, mask_path))
+
+    if to_build:
+        log.info(f"Running deepbet on {len(to_build)} T1w scan(s)...")
+        input_paths = [p for p, _ in to_build]
+        mask_paths  = [p for _, p in to_build]
+        brain_paths = [p.replace("_mask.nii.gz", "_brain.nii.gz") for p in mask_paths]
+        tiv_paths   = [p.replace("_mask.nii.gz", "_tiv.csv")      for p in mask_paths]
+        try:
+            run_bet(input_paths, brain_paths, mask_paths, tiv_paths)
+            log.info("Skull stripping complete.")
+        except Exception as e:
+            log.warning(f"deepbet failed: {e}. Proceeding without skull stripping.")
+            # Invalidate all mask paths so they are not used
+            for pid in patient_mask_path:
+                patient_mask_path[pid] = None
+    else:
+        log.info("All brain masks already cached.")
+
+    # Stamp mask path into every sample
+    for s in samples:
+        s["mask"] = patient_mask_path.get(s["patient_id"])
+
+    masked   = sum(1 for s in samples if s["mask"])
+    unmasked = len(samples) - masked
+    log.info(f"Skull strip: {masked} samples with mask, {unmasked} without.")
+    return samples
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Train the hybrid MRI scan-type classifier.",
@@ -298,6 +374,11 @@ Data input modes (mutually exclusive):
     parser.add_argument("--cache_dir", type=str, default=".slice_cache",
                         help="Directory for cached extracted slices "
                              "(set to empty string to disable)")
+    parser.add_argument("--skull_strip", action="store_true", default=False,
+                        help="Skull-strip all scans using a T1w-derived brain mask "
+                             "(requires deepbet==1.0.2)")
+    parser.add_argument("--mask_cache_dir", type=str, default=".mask_cache",
+                        help="Directory for cached brain masks from deepbet")
     parser.add_argument("--epochs", type=int, default=500)
     parser.add_argument("--unfreeze_epoch", type=int, default=50,
                         help="Epoch at which to unfreeze all CNN layers")
@@ -350,6 +431,10 @@ Data input modes (mutually exclusive):
             "--t1_dir / --t2_dir / --t1ce_dir / --flair_dir"
         )
     log.info(f"Found {len(samples)} volumes")
+
+    if args.skull_strip:
+        log.info("Skull stripping enabled.")
+        samples = skull_strip_samples(samples, args.mask_cache_dir)
 
     patient_ids = list(set(s["patient_id"] for s in samples))
     train_pids, val_pids = train_test_split(
