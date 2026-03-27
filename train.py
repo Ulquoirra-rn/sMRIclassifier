@@ -308,6 +308,8 @@ Data input modes (mutually exclusive):
                         help="Minimum decrease in val loss to count as improvement")
     parser.add_argument("--batch_size", type=int, default=51,
                         help="Ideally n_slices+1 so each batch is exactly one volume")
+    parser.add_argument("--log_interval", type=int, default=50,
+                        help="Print batch-level progress every N batches")
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--lr_finetune", type=float, default=1e-4,
                         help="LR after unfreezing")
@@ -435,12 +437,14 @@ Data input modes (mutually exclusive):
 
         log.info(f"Epoch {epoch+1}/{args.epochs} — training...")
         train_loss, train_acc = train_one_epoch(
-            model, train_loader, criterion, optimizer, device, tab_mean, tab_std
+            model, train_loader, criterion, optimizer, device, tab_mean, tab_std,
+            log_interval=args.log_interval,
         )
 
         log.info(f"Epoch {epoch+1}/{args.epochs} — validating...")
         val_loss, val_acc = evaluate(
-            model, val_loader, criterion, device, tab_mean, tab_std
+            model, val_loader, criterion, device, tab_mean, tab_std,
+            log_interval=args.log_interval,
         )
         scheduler.step(val_loss)
 
