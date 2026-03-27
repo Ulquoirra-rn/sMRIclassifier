@@ -257,9 +257,12 @@ Data input modes (mutually exclusive):
     parser.add_argument("--flair_dir", type=str, default=None,
                         help="Directory containing FLAIR NIfTI files")
     parser.add_argument("--output_dir", type=str, default="checkpoints")
-    parser.add_argument("--epochs", type=int, default=30)
-    parser.add_argument("--unfreeze_epoch", type=int, default=10,
+    parser.add_argument("--epochs", type=int, default=500)
+    parser.add_argument("--unfreeze_epoch", type=int, default=50,
                         help="Epoch at which to unfreeze all CNN layers")
+    parser.add_argument("--early_stopping_patience", type=int, default=20,
+                        help="Stop training if val accuracy does not improve "
+                             "for this many epochs (0 to disable)")
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--lr_finetune", type=float, default=1e-4,
@@ -341,6 +344,7 @@ Data input modes (mutually exclusive):
     )
 
     best_val_acc = 0.0
+    epochs_no_improve = 0
     for epoch in range(args.epochs):
         # Unfreeze all layers at specified epoch
         if epoch == args.unfreeze_epoch:
@@ -366,9 +370,18 @@ Data input modes (mutually exclusive):
 
         if val_acc > best_val_acc:
             best_val_acc = val_acc
+            epochs_no_improve = 0
             torch.save(model.state_dict(),
                        os.path.join(args.output_dir, "best_model.pth"))
             print(f"  -> Saved best model (val_acc={val_acc:.4f})")
+        else:
+            epochs_no_improve += 1
+
+        if (args.early_stopping_patience > 0
+                and epochs_no_improve >= args.early_stopping_patience):
+            print(f"\nEarly stopping: val accuracy did not improve for "
+                  f"{args.early_stopping_patience} epochs.")
+            break
 
     print(f"\nTraining complete. Best val accuracy: {best_val_acc:.4f}")
 

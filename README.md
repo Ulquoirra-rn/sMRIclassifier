@@ -121,8 +121,9 @@ python train.py \
 | `--t1ce_dir` | — | Directory of T1ce NIfTI files |
 | `--flair_dir` | — | Directory of FLAIR NIfTI files |
 | `--output_dir` | `checkpoints` | Where to save model + tabular stats |
-| `--epochs` | `30` | Total training epochs |
-| `--unfreeze_epoch` | `10` | Epoch at which to unfreeze all CNN layers |
+| `--epochs` | `500` | Maximum training epochs |
+| `--unfreeze_epoch` | `50` | Epoch at which to unfreeze all CNN layers |
+| `--early_stopping_patience` | `20` | Stop if val accuracy does not improve for this many epochs (0 to disable) |
 | `--batch_size` | `16` | Batch size |
 | `--lr` | `1e-3` | Initial learning rate (frozen stage) |
 | `--lr_finetune` | `1e-4` | Learning rate after unfreezing |
