@@ -41,12 +41,25 @@ def extract_slices(volume, n_slices=15, image_size=None):
     Returns a list of 2D float32 arrays: n_slices regular slices followed by
     1 MIP.  If image_size is given every slice is resized to
     (image_size, image_size) immediately, capping memory for high-res scans.
+
+    Slice range is determined by the actual non-zero axial extent of the volume
+    rather than a fixed percentage trim, so empty slices at the top/bottom
+    (common after skull stripping) are excluded regardless of volume length.
+    Falls back to the middle 80% if the volume is entirely zero.
     """
     n_axial = volume.shape[2]
-    # Skip top/bottom 10% to avoid empty slices
-    start = int(n_axial * 0.1)
-    end = int(n_axial * 0.9)
-    indices = np.linspace(start, end, n_slices, dtype=int)
+
+    # Find axial indices that contain at least one non-zero voxel
+    nonzero_z = np.where(volume.any(axis=(0, 1)))[0]
+    if len(nonzero_z) >= 2:
+        start = int(nonzero_z[0])
+        end   = int(nonzero_z[-1]) + 1
+    else:
+        # Fallback: middle 80%
+        start = int(n_axial * 0.1)
+        end   = int(n_axial * 0.9)
+
+    indices = np.linspace(start, end - 1, n_slices, dtype=int)
 
     slices = [volume[:, :, i] for i in indices]
 
