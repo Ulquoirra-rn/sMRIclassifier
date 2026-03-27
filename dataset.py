@@ -2,6 +2,7 @@ import hashlib
 import logging
 import os
 import json
+from collections import OrderedDict
 import numpy as np
 import nibabel as nib
 import torch
@@ -127,26 +128,35 @@ def _get_volume_slices(nifti_path, n_slices, image_size, cache_dir):
 class MRISliceDataset(Dataset):
     """Training dataset: returns individual slices for per-slice classification.
 
-    All volume slices are preloaded into RAM at init (using the disk cache when
-    available) so that __getitem__ is pure memory access — no disk I/O per batch.
+    Uses a per-worker LRU volume cache (default size 8) so that consecutive
+    requests for slices from the same volume hit RAM instead of disk, without
+    holding the entire dataset in memory.  Set lru_size=0 to disable (pure
+    lazy loading) or pass preload=True to load everything upfront if RAM allows.
     """
 
     def __init__(self, samples, n_slices=15, image_size=224, augment=False,
-                 tabular_dropout=0.3, cache_dir=None):
+                 tabular_dropout=0.3, cache_dir=None, lru_size=8, preload=False):
         self.samples = samples
         self.n_slices = n_slices
         self.slices_per_vol = n_slices + 1  # +1 for MIP
         self.image_size = image_size
         self.tabular_dropout = tabular_dropout
+        self.cache_dir = cache_dir
+        self.lru_size = lru_size
 
-        # Preload all slices into RAM: list of (slices_per_vol, H, W) float32 arrays
-        log.info(f"Preloading {len(samples)} volumes into RAM...")
-        self._slices = []
-        for i, s in enumerate(samples):
-            slices = _get_volume_slices(s["nifti"], n_slices, image_size, cache_dir)
-            self._slices.append(np.stack(slices))  # (slices_per_vol, H, W)
-            if (i + 1) % 100 == 0 or (i + 1) == len(samples):
-                log.info(f"  Preloaded {i+1}/{len(samples)} volumes")
+        if preload:
+            log.info(f"Preloading {len(samples)} volumes into RAM...")
+            self._preloaded = []
+            for i, s in enumerate(samples):
+                slices = _get_volume_slices(s["nifti"], n_slices, image_size, cache_dir)
+                self._preloaded.append(np.stack(slices))
+                if (i + 1) % 100 == 0 or (i + 1) == len(samples):
+                    log.info(f"  Preloaded {i+1}/{len(samples)} volumes")
+        else:
+            self._preloaded = None
+            # Per-worker LRU: populated lazily in _get_slices()
+            # (initialised in each worker via worker_init or on first access)
+            self._lru: OrderedDict = None
 
         if augment:
             self.transform = transforms.Compose([
@@ -161,6 +171,30 @@ class MRISliceDataset(Dataset):
                 transforms.ToTensor(),
             ])
 
+    def _get_slices(self, vol_idx):
+        """Return the (slices_per_vol, H, W) array for vol_idx, using LRU cache."""
+        if self._preloaded is not None:
+            return self._preloaded[vol_idx]
+
+        # Initialise LRU dict on first access within this worker process
+        if self._lru is None:
+            self._lru = OrderedDict()
+
+        if vol_idx in self._lru:
+            self._lru.move_to_end(vol_idx)
+            return self._lru[vol_idx]
+
+        slices = _get_volume_slices(
+            self.samples[vol_idx]["nifti"], self.n_slices,
+            self.image_size, self.cache_dir,
+        )
+        arr = np.stack(slices)
+        self._lru[vol_idx] = arr
+        self._lru.move_to_end(vol_idx)
+        if self.lru_size and len(self._lru) > self.lru_size:
+            self._lru.popitem(last=False)
+        return arr
+
     def __len__(self):
         return len(self.samples) * self.slices_per_vol
 
@@ -169,7 +203,7 @@ class MRISliceDataset(Dataset):
         slice_idx = idx % self.slices_per_vol
         sample = self.samples[vol_idx]
 
-        slice_2d = normalize_slice(self._slices[vol_idx][slice_idx])
+        slice_2d = normalize_slice(self._get_slices(vol_idx)[slice_idx])
         img = self.transform(slice_2d)
         img = img.repeat(3, 1, 1) if img.shape[0] == 1 else img
 

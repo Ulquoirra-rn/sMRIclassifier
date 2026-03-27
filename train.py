@@ -302,8 +302,10 @@ Data input modes (mutually exclusive):
     parser.add_argument("--unfreeze_epoch", type=int, default=50,
                         help="Epoch at which to unfreeze all CNN layers")
     parser.add_argument("--early_stopping_patience", type=int, default=20,
-                        help="Stop training if val accuracy does not improve "
-                             "for this many epochs (0 to disable)")
+                        help="Stop after this many consecutive epochs without "
+                             "val loss improvement (0 to disable)")
+    parser.add_argument("--early_stopping_min_delta", type=float, default=1e-4,
+                        help="Minimum decrease in val loss to count as improvement")
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--lr_finetune", type=float, default=1e-4,
@@ -405,14 +407,17 @@ Data input modes (mutually exclusive):
     )
 
     log.info(f"Starting training: max {args.epochs} epochs | "
-             f"early stopping patience {args.early_stopping_patience}")
+             f"early stopping patience {args.early_stopping_patience} consecutive epochs | "
+             f"min delta {args.early_stopping_min_delta}")
 
+    best_val_loss = float("inf")
     best_val_acc = 0.0
-    epochs_no_improve = 0
+    consecutive_no_improve = 0
     for epoch in range(args.epochs):
         epoch_start = time.time()
 
-        # Unfreeze all layers at specified epoch
+        # Unfreeze all layers at specified epoch; reset patience so the loss
+        # spike from newly unfrozen weights doesn't trigger early stopping
         if epoch == args.unfreeze_epoch:
             log.info(f"--- Unfreezing all CNN layers at epoch {epoch+1} ---")
             model.unfreeze_all()
@@ -422,6 +427,8 @@ Data input modes (mutually exclusive):
             )
             n_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
             log.info(f"Trainable parameters after unfreeze: {n_trainable:,}")
+            consecutive_no_improve = 0
+            log.info("Early-stopping counter reset after unfreeze.")
 
         log.info(f"Epoch {epoch+1}/{args.epochs} — training...")
         train_loss, train_acc = train_one_epoch(
@@ -443,23 +450,30 @@ Data input modes (mutually exclusive):
             f"LR {lr:.2e} | {elapsed:.1f}s"
         )
 
-        if val_acc > best_val_acc:
-            best_val_acc = val_acc
-            epochs_no_improve = 0
+        # Improvement = val loss decreased by at least min_delta
+        if val_loss < best_val_loss - args.early_stopping_min_delta:
+            best_val_loss = val_loss
+            consecutive_no_improve = 0
+            if val_acc > best_val_acc:
+                best_val_acc = val_acc
             torch.save(model.state_dict(),
                        os.path.join(args.output_dir, "best_model.pth"))
-            log.info(f"  -> New best model saved (val_acc={val_acc:.4f})")
+            log.info(f"  -> New best model saved "
+                     f"(val_loss={val_loss:.4f}, val_acc={val_acc:.4f})")
         else:
-            epochs_no_improve += 1
-            log.info(f"  -> No improvement ({epochs_no_improve}/"
-                     f"{args.early_stopping_patience})")
+            consecutive_no_improve += 1
+            log.info(f"  -> No improvement for {consecutive_no_improve} consecutive "
+                     f"epoch(s) (patience {args.early_stopping_patience})")
 
         if (args.early_stopping_patience > 0
-                and epochs_no_improve >= args.early_stopping_patience):
-            log.info(f"Early stopping triggered after {epoch+1} epochs.")
+                and consecutive_no_improve >= args.early_stopping_patience):
+            log.info(f"Early stopping: val loss did not improve by more than "
+                     f"{args.early_stopping_min_delta} for "
+                     f"{args.early_stopping_patience} consecutive epochs.")
             break
 
-    log.info(f"Training complete. Best val accuracy: {best_val_acc:.4f}")
+    log.info(f"Training complete. Best val loss: {best_val_loss:.4f} | "
+             f"Best val acc: {best_val_acc:.4f}")
 
 
 if __name__ == "__main__":
