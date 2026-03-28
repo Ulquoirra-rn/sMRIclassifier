@@ -395,7 +395,11 @@ Data input modes (mutually exclusive):
     parser.add_argument("--lr_finetune", type=float, default=1e-4,
                         help="LR after unfreezing")
     parser.add_argument("--n_slices", type=int, default=15)
-    parser.add_argument("--tabular_dropout", type=float, default=0.3)
+    parser.add_argument("--tabular_dropout", type=float, default=0.8,
+                        help="Fraction of training samples where tabular features "
+                             "are zeroed out, forcing the CNN to learn from images. "
+                             "Keep high (>=0.7) so the model does not learn to ignore "
+                             "image content in favour of acquisition metadata.")
     parser.add_argument("--val_split", type=float, default=0.2)
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()

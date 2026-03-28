@@ -115,7 +115,7 @@ def main():
     parser.add_argument("--tabular_stats", type=str,
                         default="checkpoints/tabular_stats.json")
     parser.add_argument("--output_dir", type=str, default="explanations")
-    parser.add_argument("--n_slices", type=int, default=15)
+    parser.add_argument("--n_slices", type=int, default=50)
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -145,12 +145,13 @@ def main():
     mask = torch.tensor(mask, device=device).unsqueeze(0)
 
     # Load volume and extract slices
-    vol = nib.load(args.input).get_fdata()
-    all_slices = extract_slices(vol, args.n_slices)
+    vol = np.squeeze(nib.load(args.input).get_fdata())
+    if vol.ndim > 3:
+        vol = vol[..., 0]
+    all_slices = extract_slices(vol, args.n_slices, image_size=224)
 
     transform = transforms.Compose([
         transforms.ToPILImage(),
-        transforms.Resize((224, 224)),
         transforms.ToTensor(),
     ])
 
@@ -159,7 +160,9 @@ def main():
 
     for i, s in enumerate(all_slices):
         slice_2d = normalize_slice(s)
-        img = transform(slice_2d).repeat(3, 1, 1).unsqueeze(0).to(device)
+        img = transform(slice_2d)
+        img = img.repeat(3, 1, 1) if img.shape[0] == 1 else img
+        img = img.unsqueeze(0).to(device)
 
         heatmap, pred_class = grad_cam.generate(img, tabular, mask)
         pred_label = LABEL_NAMES[pred_class]
