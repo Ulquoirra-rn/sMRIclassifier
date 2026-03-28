@@ -59,11 +59,23 @@ def extract_slices(volume, n_slices=15, image_size=None):
         start = int(n_axial * 0.1)
         end   = int(n_axial * 0.9)
 
-    indices = np.linspace(start, end - 1, n_slices, dtype=int)
+    # Select n_slices consecutive slices centred on the non-zero extent midpoint
+    center = (start + end) // 2
+    half   = n_slices // 2
+    s0 = max(start, center - half)
+    s1 = s0 + n_slices
+    if s1 > end:          # clamp to available range
+        s1 = end
+        s0 = max(start, s1 - n_slices)
+    # If the non-zero extent is shorter than n_slices, sample evenly within it
+    if s1 - s0 < n_slices:
+        indices = np.linspace(start, end - 1, n_slices, dtype=int)
+    else:
+        indices = np.arange(s0, s1, dtype=int)
 
     slices = [volume[:, :, i] for i in indices]
 
-    # Axial max-intensity projection
+    # Axial max-intensity projection over the full non-zero extent
     mip = np.max(volume[:, :, start:end], axis=2)
     slices.append(mip)
 
@@ -209,7 +221,13 @@ class MRISliceDataset(Dataset):
             self.transform = transforms.Compose([
                 transforms.ToPILImage(),
                 transforms.RandomHorizontalFlip(),
-                transforms.RandomAffine(degrees=10, translate=(0.05, 0.05)),
+                transforms.RandomVerticalFlip(p=0.1),
+                transforms.RandomAffine(
+                    degrees=15,
+                    translate=(0.1, 0.1),
+                    scale=(0.9, 1.1),
+                ),
+                transforms.ColorJitter(brightness=0.3, contrast=0.3),
                 transforms.ToTensor(),
             ])
         else:

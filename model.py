@@ -24,12 +24,15 @@ class HybridMRIClassifier(nn.Module):
         self.tabular_branch = nn.Sequential(
             nn.Linear(N_TABULAR, tabular_dim),
             nn.ReLU(),
-            nn.Dropout(0.3),
+            nn.Dropout(0.5),
         )
 
         # Classifier head
         self.classifier = nn.Sequential(
-            nn.Linear(cnn_out_dim + tabular_dim, 128),
+            nn.Linear(cnn_out_dim + tabular_dim, 256),
+            nn.ReLU(),
+            nn.Dropout(0.5),
+            nn.Linear(256, 128),
             nn.ReLU(),
             nn.Dropout(0.3),
             nn.Linear(128, n_classes),

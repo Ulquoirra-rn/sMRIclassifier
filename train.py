@@ -394,6 +394,8 @@ Data input modes (mutually exclusive):
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--lr_finetune", type=float, default=1e-4,
                         help="LR after unfreezing")
+    parser.add_argument("--weight_decay", type=float, default=1e-4,
+                        help="L2 regularisation for Adam optimizer")
     parser.add_argument("--n_slices", type=int, default=15)
     parser.add_argument("--tabular_dropout", type=float, default=0.8,
                         help="Fraction of training samples where tabular features "
@@ -497,7 +499,8 @@ Data input modes (mutually exclusive):
 
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(
-        filter(lambda p: p.requires_grad, model.parameters()), lr=args.lr
+        filter(lambda p: p.requires_grad, model.parameters()),
+        lr=args.lr, weight_decay=args.weight_decay,
     )
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, patience=3, factor=0.5
@@ -518,7 +521,10 @@ Data input modes (mutually exclusive):
         if epoch == args.unfreeze_epoch:
             log.info(f"--- Unfreezing all CNN layers at epoch {epoch+1} ---")
             model.unfreeze_all()
-            optimizer = torch.optim.Adam(model.parameters(), lr=args.lr_finetune)
+            optimizer = torch.optim.Adam(
+                model.parameters(), lr=args.lr_finetune,
+                weight_decay=args.weight_decay,
+            )
             scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
                 optimizer, patience=3, factor=0.5
             )
@@ -555,10 +561,17 @@ Data input modes (mutually exclusive):
             consecutive_no_improve = 0
             if val_acc > best_val_acc:
                 best_val_acc = val_acc
-            torch.save(model.state_dict(),
-                       os.path.join(args.output_dir, "best_model.pth"))
-            log.info(f"  -> New best model saved "
-                     f"(val_loss={val_loss:.4f}, val_acc={val_acc:.4f})")
+            ckpt_name = (
+                f"best_model"
+                f"_ep{epoch+1:03d}"
+                f"_trainacc{train_acc:.4f}"
+                f"_valacc{val_acc:.4f}"
+                f"_valloss{val_loss:.4f}"
+                f".pth"
+            )
+            ckpt_path = os.path.join(args.output_dir, ckpt_name)
+            torch.save(model.state_dict(), ckpt_path)
+            log.info(f"  -> New best model saved: {ckpt_name}")
         else:
             consecutive_no_improve += 1
             log.info(f"  -> No improvement for {consecutive_no_improve} consecutive "
