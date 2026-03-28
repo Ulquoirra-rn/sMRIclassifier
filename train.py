@@ -437,6 +437,11 @@ Data input modes (mutually exclusive):
             "--t1_dir / --t2_dir / --t1ce_dir / --flair_dir"
         )
     log.info(f"Found {len(samples)} volumes")
+    label_counts = {}
+    for s in samples:
+        label_counts[s["label"]] = label_counts.get(s["label"], 0) + 1
+    for label, count in sorted(label_counts.items()):
+        log.info(f"  {label:6s}: {count:4d} ({100*count/len(samples):.1f}%)")
 
     if args.skull_strip:
         log.info("Skull stripping enabled.")
@@ -497,7 +502,20 @@ Data input modes (mutually exclusive):
     n_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     log.info(f"Parameters: {n_params:,} total | {n_trainable:,} trainable")
 
-    criterion = nn.CrossEntropyLoss()
+    # Compute class weights from training set to handle imbalance
+    from dataset import LABEL_MAP
+    n_classes = len(LABEL_MAP)
+    class_counts = [0] * n_classes
+    for s in train_samples:
+        class_counts[LABEL_MAP[s["label"].lower()]] += 1
+    class_weights = torch.tensor(
+        [len(train_samples) / (n_classes * max(c, 1)) for c in class_counts],
+        dtype=torch.float32, device=device,
+    )
+    log.info("Class weights: " + " | ".join(
+        f"{k}={class_weights[v].item():.3f}" for k, v in LABEL_MAP.items()
+    ))
+    criterion = nn.CrossEntropyLoss(weight=class_weights)
     optimizer = torch.optim.Adam(
         filter(lambda p: p.requires_grad, model.parameters()),
         lr=args.lr, weight_decay=args.weight_decay,
